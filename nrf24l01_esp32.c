@@ -1,136 +1,145 @@
 #include <stdio.h>
-#include <stdint.h>
 #include <string.h>
-#include "esp_spi_flash.h"
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "ringbuf.h"
+
+#include "esp8266/spi_struct.h"
+#include "esp8266/gpio_struct.h"
 #include "esp_system.h"
-#include "soc/gpio_struct.h"
 #include "esp_log.h"
-#include "esp_err.h"
-#include "esp_heap_caps.h"
-#include "driver/spi_common.h"
-#include "sdkconfig.h"
-#include "driver/periph_ctrl.h"
+
 #include "driver/gpio.h"
-#include "esp32/rom/ets_sys.h"
+#include "driver/spi.h"
+#include <esp_timer.h>
 
-//requirements for spi
-#define MISO_PIN  17
-#define MOSI_PIN  5
-#define SCLK_PIN  23
-#define CS_PIN    16
-#define SPI_CLOCK 100000  // 500KHz may be a bit too fast for breadboard
+//spi dependancies
+#define NRF24L01_CE_GPIO    16
+#define NRF24L01_CE_MASK    (1ULL<<NRF24L01_CE_GPIO)
 #include "./spi.h"
-
-#define GPIO_NRF24L01_CE        22
-#define GPIO_NRF24L01_CE_MASK   (1ULL << 22)
-
-
-int nrf24_receive_pkt ( uint8_t *data, int length) {
-    //setup nrf24l01 transmitter
-    spiWriteByte (spi, 0x20 | 0x00, 0x01); //no crc, rx mode
-    spiWriteByte (spi, 0x20 | 0x01, 0x00); //no auto ack
-    spiWriteByte (spi, 0x20 | 0x02, 0x01); //pipe0
-    spiWriteByte (spi, 0x20 | 0x03, 0x03); 
-    spiWriteByte (spi, 0x20 | 0x04, 0x00); 
-    spiWriteByte (spi, 0x20 | 0x05, 0x05); //freq channel 5
-    spiWriteByte (spi, 0x20 | 0x06, 0x06); //low power, 1MB/sec
-    spiWriteByte (spi, 0x20 | 0x11, 0x20); //use all 32 bytes
-
-    //turn on and flush fifo
-    spiWriteByte (spi, 0x20 | 0x00, 0x03); //turn on
-    spiWriteByte (spi, 0xe1, 0x00); //flush tx fifo
-    spiWriteByte (spi, 0x20 | 0x07, 0x70); 
-    gpio_set_level (GPIO_NRF24L01_CE, 1);
-    ets_delay_us(100);                          //busy-wait
-
-    int waitcnt = 0;
-    while(1){
-	spiReadByte (spi, 0x07, data);
-        int temp = data[0];
-        ets_delay_us(10000);
-        //printf(" %d    0x%x\n", waitcnt, temp);
-        if( (temp & 0x40) > 1 || waitcnt > 200) break;
-        ++waitcnt;
-    }
-    if (waitcnt == 20) printf("wait timed out\n");
-
-    //read packet from nrf24l01 transmitter
-    spiReadBytes ( spi, 0x61, 32+1, data);
-
-    //set ce = 0
-    gpio_set_level (GPIO_NRF24L01_CE, 0);
-
-    printf("%8.4f   waited %3dmsec  for %2dbytes\n      ", (float)esp_timer_get_time()/1000000, 10*waitcnt, 32);
-    for(int n = 0; n < 32; n++) {printf(" 0x%02x", data[n+1]); if(n%16 == 15) printf("\n      "); }
-
-    vTaskDelay(1);
-    return(0);
-}
 
 int nrf24_transmit_pkt ( uint8_t *data, int length) {
     //setup nrf24l01 transmitter
-    spiWriteByte (spi, 0x20 | 0x00, 0x00); //no crc, tx mode
-    spiWriteByte (spi, 0x20 | 0x01, 0x00); //no auto ack
-    spiWriteByte (spi, 0x20 | 0x02, 0x01); //pipe0
-    spiWriteByte (spi, 0x20 | 0x03, 0x03); 
-    spiWriteByte (spi, 0x20 | 0x04, 0x04); 
-    spiWriteByte (spi, 0x20 | 0x05, 0x05); //freq channel 5
-    spiWriteByte (spi, 0x20 | 0x06, 0x06); //low power, 1MB/sec
-    spiWriteByte (spi, 0x20 | 0x11, 0x20); //use all 32 bytes
+    gpio_set_level (NRF24L01_CE_GPIO, 0);
+    spi_write_byte ( 0x20 | 0x00, 0x00); //no crc, tx mode
+    spi_write_byte ( 0x20 | 0x01, 0x00); //no auto ack
+    spi_write_byte ( 0x20 | 0x02, 0x01); //pipe0
+    spi_write_byte ( 0x20 | 0x03, 0x03);
+    spi_write_byte ( 0x20 | 0x04, 0x04);
+    spi_write_byte ( 0x20 | 0x05, 0x05); //freq channel 5
+    spi_write_byte ( 0x20 | 0x06, 0x06); //low power, 1MB/sec
+    spi_write_byte ( 0x20 | 0x11, 0x20); //use all 32 bytes
 
     //turn on and flush fifo
-    spiWriteByte (spi, 0x20 | 0x00, 0x02); //turn on
-    spiWriteByte (spi, 0xe1, 0x00); //flush tx fifo
-    spiWriteByte (spi, 0x20 | 0x07, 0x70); 
-    ets_delay_us(100);                          //busy-wait
-
-    //send packet to nrf24l01 transmitter
-    spiWriteBytes (spi, 0xa0, length, data);
-
-        //ce chip radio enable
-    //with jumper wires on bread board ce pulse 45us was about 50%
-    gpio_set_level (GPIO_NRF24L01_CE, 1);
-    ets_delay_us(500);                          //busy-wait
-    gpio_set_level (GPIO_NRF24L01_CE, 0);
-
-    spiWriteByte (spi, 0x20 | 0x00, 0x00); //turn off
+    spi_write_byte ( 0x20 | 0x00, 0x02); //turn on
+    spi_write_byte ( 0xe1, 0x00);        //flush tx fifo
+    spi_write_byte ( 0x20 | 0x07, 0x70);
+    //ets_delay_us(10);                          //busy-wait
 
     vTaskDelay(1);
+    printf("   post flush  = 0x%02x  0x%02x\n", 
+          spi_read_bytes ( 0x07, data, 1), spi_read_bytes ( 0x17, data, 1));
+
+    //send packet to nrf24l01 transmitter
+    spi_write_bytes ( 0xa0, data, length);
+
+    vTaskDelay(1);
+    printf("   post fifow  = 0x%02x  0x%02x\n", 
+          spi_read_bytes ( 0x07, data, 1), spi_read_bytes ( 0x17, data, 1));
+
+    //ce chip radio enable
+    //with jumper wires on bread board ce pulse 45us was about 50%
+    gpio_set_level (NRF24L01_CE_GPIO, 1);
+    ets_delay_us(500);                          //busy-wait
+    gpio_set_level (NRF24L01_CE_GPIO, 0);
+
+    vTaskDelay(1);
+    printf("   post trans  = 0x%02x  0x%02x\n", 
+          spi_read_bytes ( 0x07, data, 1), spi_read_bytes ( 0x17, data, 1));
+
+    spi_write_byte ( 0x20 | 0x00, 0x00); //turn off
+
     return(0);
 }
 
-void gpio_init() {
-    gpio_config_t io_conf;
-    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_NRF24L01_CE);
-    io_conf.pull_down_en = 0;
-    io_conf.pull_up_en = 0;
-    gpio_config ( &io_conf );
+int wait_rcv_pkt ( uint8_t *data, int timeout) {
+    //setup nrf24l01 transmitter
+    gpio_set_level (NRF24L01_CE_GPIO, 0);
+    spi_write_byte ( 0x20 | 0x00, 0x00); //no crc, tx mode
+    spi_write_byte ( 0x20 | 0x00, 0x01); //no crc, rx mode
+    spi_write_byte ( 0x20 | 0x01, 0x00); //no auto ack
+    spi_write_byte ( 0x20 | 0x02, 0x01); //pipe0
+    spi_write_byte ( 0x20 | 0x03, 0x03);
+    spi_write_byte ( 0x20 | 0x04, 0x00);
+    spi_write_byte ( 0x20 | 0x05, 0x05); //freq channel 5
+    spi_write_byte ( 0x20 | 0x06, 0x06); //low power, 1MB/sec
+    spi_write_byte ( 0x20 | 0x11, 0x20); //use all 32 bytes
+
+    //turn on and flush fifo
+    spi_write_byte ( 0x20 | 0x00, 0x03); //turn on
+    spi_write_byte ( 0xe2, 0x00); //flush rx fifo
+    spi_write_byte ( 0x20 | 0x07, 0x70);
+    vTaskDelay(1);
+    //printf("   post flush  = 0x%02x  0x%02x  0x%02x\n", 
+    //      spi_read_bytes ( 0x07, data, 1), spi_read_bytes ( 0x11, data, 1), 
+//	  spi_read_bytes ( 0x17, data, 1 ));
+    gpio_set_level (NRF24L01_CE_GPIO, 1);
+    ets_delay_us(100);                          //busy-wait
+
+    int waitcnt = 0;
+    int timestart = esp_timer_get_time();
+    while(1){
+	vTaskDelay(1);
+        //printf("   post pwait  = 0x%02x  0x%02x\n", 
+        //      spi_read_bytes ( 0x07, data, 1), spi_read_bytes ( 0x17, data, 1 ));
+	spi_read_bytes ( 0x07, data, 1);
+        if( (data[0] & 0x40) > 1 || waitcnt > timeout) break;
+        ++waitcnt;
+    }
+    if (waitcnt == 20) printf("wait timed out\n");
+    printf(" powerrx 0x09 = 0x%02x\n", spi_read_bytes ( 0x09, data, 1 ));
+    //printf("   post await  = 0x%02x  0x%02x  0x%02x\n", 
+    //      spi_read_bytes ( 0x07, data, 1), spi_read_bytes ( 0x11, data, 1), 
+//	  spi_read_bytes ( 0x17, data, 1 ));
+
+    //read packet from nrf24l01 transmitter
+    spi_read_bytes ( 0x61, data, 32+1);
+
+    //set ce = 0
+    gpio_set_level (NRF24L01_CE_GPIO, 0);
+
+    printf("waited %8.4fsec  for %2dbytes\n      ", 
+	    (float)(esp_timer_get_time()-timestart)/1000000, 32);
+    for(int n = 0; n < 32; n++) {
+	            printf(" 0x%02x", data[n+1]); if(n%16 == 15) printf("\n      ");
+    }
+ //   printf("   post aread  = 0x%02x  0x%02x  0x%02x\n\n\n", 
+  //        spi_read_bytes ( 0x07, data, 1), spi_read_bytes ( 0x11, data, 1), 
+//	  spi_read_bytes ( 0x17, data, 1 ));
+    vTaskDelay(1);
+    return(waitcnt);
 }
+
 
 void app_main(void)
 {
-    gpio_init();
-    spi_init();
+    uint8_t data[32] = { 'H', 'e', 'l', 'l', 'o', '\n' }; //max length nrf20l01 packet
 
-    uint8_t data[32];
-    for(int i = 0; i <= 0x1d; i++){
-       spiReadByte (spi, i, data);
-       printf("regaddr = 0x%02x  data = 0x%02x\n", i, data[0]);
-    }
+    gpio_initialize();
+    spi_initialize();
 
-    int cnt = 0;
+    //print register space
+    for (int a = 0; a < 0x1d; a++)
+	printf(" reg 0x%02x  data 0x%02x\n", a, spi_read_bytes ( a, data, 1));
 
+    nrf24_transmit_pkt ( data, 6 );
+
+    printf("get packets\n");
     while(1) {
-	 for(int a=0; a < 32; a++) data[a] = cnt + a;
-         nrf24_transmit_pkt (data, 32);
-	 ets_delay_us(1000000);
-	 printf("%7.4f  sent packet\n", (float) esp_timer_get_time() / 1000000);
-         ++cnt;
+        int retlen=wait_rcv_pkt ( data, 1000);  //wait watch about 10msec per 
+        printf("waited about %dmsec\n\n",10*retlen);
     }
-
 
 }

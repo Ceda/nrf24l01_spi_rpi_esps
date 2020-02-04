@@ -6,7 +6,7 @@
 void gpio_initialize(){
     printf( "init gpio\n");
     gpio_config_t io_conf;
-    io_conf.intr_type = GPIO_INTR_POSEDGE;
+    io_conf.intr_type = NRF24L01_CE_GPIO;
     io_conf.mode = GPIO_MODE_OUTPUT;
     io_conf.pin_bit_mask = NRF24L01_CE_MASK;
     io_conf.pull_down_en = 0;
@@ -54,7 +54,7 @@ uint8_t spi_read_bytes ( uint16_t cmd, uint8_t *rdata, int length){
 void spi_write_bytes ( uint16_t cmd, uint8_t *wdata, int length){
      uint32_t wx[16];
      //convert to uint32_t array from passed byte array
-     for(int n=0; n< length; n++) wx[n] = *(uint32_t*) &wdata[4*n];
+     for(int n=0; n< length; n=n+4) wx[n/4] = *(uint32_t*) &wdata[n];
 
      spi_trans_t trans;
      memset(&trans, 0x0, sizeof(trans));
@@ -65,6 +65,19 @@ void spi_write_bytes ( uint16_t cmd, uint8_t *wdata, int length){
      trans.cmd = &cmd;
      trans.addr = NULL;
      trans.mosi = wx;
+     spi_trans(HSPI_HOST, &trans);    
+}
+
+void spi_write_byte ( uint16_t cmd, uint32_t data){
+     spi_trans_t trans;
+     memset(&trans, 0x0, sizeof(trans));
+     trans.bits.val = 0;
+     trans.bits.cmd = 8 * 1;  
+     trans.bits.addr = 0;          // transmit status do not use address bit
+     trans.bits.mosi = 8 * 1;
+     trans.cmd = &cmd;
+     trans.addr = NULL;
+     trans.mosi = &data;
      spi_trans(HSPI_HOST, &trans);    
 }
 
