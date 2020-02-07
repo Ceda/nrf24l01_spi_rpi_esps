@@ -44,7 +44,7 @@ int nrf24_transmit_pkt ( uint8_t *data, int length) {
     spi_write_byte ( 0x20 | 0x00, 0x02); //turn on
     spi_write_byte ( 0xe1, 0x00);        //flush tx fifo
     spi_write_byte ( 0x20 | 0x07, 0x70);
-    //ets_delay_us(10);                          //busy-wait
+    ets_delay_us(10);                          //busy-wait
 
     //vTaskDelay(1);
     //printf("   post flush  = 0x%02x  0x%02x\n", 
@@ -97,40 +97,36 @@ int wait_rcv_pkt ( uint8_t *data, int timeout) {
     int timestart = esp_timer_get_time();
     while(1){
 	spi_read_bytes ( 0x07, data, 1);
-        ets_delay_us(1000);                          //busy-wait
+        //ets_delay_us(1000);                          //busy-wait
+	vTaskDelay(1);
         if( (data[0] & 0x40) > 1 || waitcnt > timeout) break;
         ++waitcnt;
+	//vTaskDelay(1);
     }
-    if (waitcnt > timeout) printf("wait timed out\n");
-        else spi_read_bytes ( 0x61, data, 32+1);
+    //if (waitcnt > timeout) printf("wait timed out\n");
+    if(waitcnt < timeout) spi_read_bytes ( 0x61, data, 32+1);
 
     //set ce = 0
     gpio_set_level (NRF24L01_CE_GPIO, 0);
 
-    //printf("waited %8.4fsec  for %2dbytes\n      ", 
-    //	    (float)(esp_timer_get_time()-timestart)/1000000, 32);
+    printf("waited %8.4fsec   ", 
+    	    (float)(esp_timer_get_time()-timestart)/1000000);
     return(waitcnt);
 }
 
 void rflink_task () {
-    char data[33];
+    uint8_t data[33];
     TickType_t xLoopStart = xTaskGetTickCount();
     while(1) {
-	sprintf( data, "%4d,%4d,%4d,%4d,%4d,%2d", cnt,1000,1500,1500,1500,7);
+	sprintf((char*) data, "%4d,%4d,%4d,%4d,%4d,%2d", cnt,1000,1500,1500,1500,7);
 	//printf("%s", data);
         nrf24_transmit_pkt ( (uint8_t*)data, 32 );
 	++cnt;
 
-	int timeout = 100;  //1msec per
+	int timeout = 5;  //1msec per
         int waitlen = wait_rcv_pkt ( (uint8_t*)data, timeout); 
 	if (waitlen < timeout)
-	   printf("%5d %d %d %d %d %d %d %d %d   %d %d %d %d %d %d\n", 
-		256*data[0]+data[1], 
-		data[2], data[3], data[4], 256*data[5]+data[6], 
-		256*data[7]+data[8], 256*data[9]+data[10], 256*data[11]+data[12], 
-		data[13],
-		256*data[14]+data[15], 256*data[16]+data[17], 256*data[18]+data[19],
-		256*data[20]+data[21], 256*data[22]+data[23], 256*data[24]+data[25]);
+            for(int a =0; a<32; a++) printf("0x%02x ", data[a]); printf("\n");
 
 	vTaskDelay(1);
 	vTaskDelayUntil(&xLoopStart, 10);
@@ -160,7 +156,6 @@ void app_main(void)
 
     xTaskCreate (rflink_task, "rflink_task", 2048, NULL, 4, NULL);
 
-    //TickType_t xLoopStart;
     TickType_t xLoopStart = xTaskGetTickCount();
     while(1) {
 	sprintf (disp_str, "4 F-450 Xmit|||1 height=%3d| 0x%02x",cnt, data[1]);
